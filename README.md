@@ -1,5 +1,10 @@
 # 🦙 LaMa: Resolution-robust Large Mask Inpainting with Fourier Convolutions
 
+> **AMD GPU / ROCm fork.** This fork updates the dependency stack and code to run
+> and train LaMa on modern AMD GPUs (e.g. Radeon RX 9070 XT) via ROCm, using
+> PyTorch 2.8 + ROCm 6.4 and PyTorch Lightning 2.5. See **[ROCM.md](ROCM.md)** for
+> setup instructions and a summary of what changed relative to upstream.
+
 by Roman Suvorov, Elizaveta Logacheva, Anton Mashikhin, 
 Anastasia Remizova, Arsenii Ashukha, Aleksei Silvestrov, Naejin Kong, Harshith Goka, Kiwoong Park, Victor Lempitsky.
 

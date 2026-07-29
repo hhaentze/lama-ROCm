@@ -1,4 +1,3 @@
-# @package _group_
 run:
   dir: ${location.out_root_dir}/${env:USER}_${hydra:job.name}_${hydra:job.config_name}_${run_title}
 sweep:

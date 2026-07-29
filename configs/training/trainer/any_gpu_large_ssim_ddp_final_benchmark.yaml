@@ -1,4 +1,3 @@
-# @package _group_
 kwargs:
   gpus: -1
   accelerator: ddp

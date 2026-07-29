@@ -1,4 +1,3 @@
-# @package _group_
 generator:
   kind: adam
   lr: 0.001

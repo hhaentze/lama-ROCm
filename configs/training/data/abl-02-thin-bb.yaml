@@ -1,5 +1,3 @@
-# @package _group_
-
 # try to resemble mask generation of DeepFill v2
 # official tf version: https://github.com/JiahuiYu/generative_inpainting/blob/master/inpaint_ops.py#L168
 # pytorch version: https://github.com/zhaoyuzhi/deepfillv2/blob/62dad2c601400e14d79f4d1e090c2effcb9bf3eb/deepfillv2/dataset.py#L40

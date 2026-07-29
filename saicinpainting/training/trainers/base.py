@@ -64,6 +64,27 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
 
         self.config = config
 
+        # PyTorch Lightning >= 2.0 dropped support for automatic optimization with
+        # more than one optimizer (this module trains a generator and a
+        # discriminator), so we drive the optimizer steps manually in
+        # ``training_step``. See https://lightning.ai/docs/pytorch/stable/model/manual_optimization.html
+        self.automatic_optimization = False
+
+        # Under manual optimization Lightning no longer clips gradients for us,
+        # so we read the desired clipping from the trainer config and apply it
+        # ourselves (see ``_clip_gradients_manual``).
+        self._grad_clip_val = 0
+        self._grad_clip_algorithm = 'norm'
+        if 'trainer' in config and config.get('trainer') is not None:
+            _trainer_kwargs = config.trainer.get('kwargs', {}) or {}
+            self._grad_clip_val = _trainer_kwargs.get('gradient_clip_val', 0) or 0
+            self._grad_clip_algorithm = _trainer_kwargs.get('gradient_clip_algorithm', 'norm') or 'norm'
+
+        # ``validation_epoch_end(outputs)`` was removed in Lightning 2.0; we now
+        # accumulate the per-step outputs here and consume them in
+        # ``on_validation_epoch_end``.
+        self.validation_step_outputs = []
+
         self.generator = make_generator(config, **self.config.generator)
         self.use_ddp = use_ddp
 
@@ -116,15 +137,17 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
 
     def configure_optimizers(self):
         discriminator_params = list(self.discriminator.parameters())
+        # NOTE: order matters - self.optimizers() returns them in this order and
+        # training_step relies on [generator, discriminator].
         return [
-            dict(optimizer=make_optimizer(self.generator.parameters(), **self.config.optimizers.generator)),
-            dict(optimizer=make_optimizer(discriminator_params, **self.config.optimizers.discriminator)),
+            make_optimizer(self.generator.parameters(), **self.config.optimizers.generator),
+            make_optimizer(discriminator_params, **self.config.optimizers.discriminator),
         ]
 
     def train_dataloader(self):
         kwargs = dict(self.config.data.train)
         if self.use_ddp:
-            kwargs['ddp_kwargs'] = dict(num_replicas=self.trainer.num_nodes * self.trainer.num_processes,
+            kwargs['ddp_kwargs'] = dict(num_replicas=self.trainer.world_size,
                                         rank=self.trainer.global_rank,
                                         shuffle=True)
         dataloader = make_default_train_dataloader(**self.config.data.train)
@@ -144,11 +167,61 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
 
         return res
 
-    def training_step(self, batch, batch_idx, optimizer_idx=None):
-        self._is_training_step = True
-        return self._do_step(batch, batch_idx, mode='train', optimizer_idx=optimizer_idx)
+    def _clip_gradients_manual(self, optimizer):
+        # Lightning does not clip gradients automatically under manual
+        # optimization, so we replicate the trainer's gradient_clip_val here.
+        if self._grad_clip_val and self._grad_clip_val > 0:
+            self.clip_gradients(optimizer,
+                                gradient_clip_val=self._grad_clip_val,
+                                gradient_clip_algorithm=self._grad_clip_algorithm)
 
-    def validation_step(self, batch, batch_idx, dataloader_idx):
+    def training_step(self, batch, batch_idx):
+        self._is_training_step = True
+
+        optimizers = self.optimizers()
+        if not isinstance(optimizers, (list, tuple)):
+            optimizers = [optimizers]
+        gen_optimizer = optimizers[0]
+        discr_optimizer = optimizers[1] if len(optimizers) > 1 else None
+
+        log_info = {}
+
+        # ---------------------------------------------------------- generator
+        gen_result = self._do_step(batch, batch_idx, mode='train', optimizer_idx=0)
+        gen_loss = gen_result['loss']
+        log_info.update(gen_result['log_info'])
+        if torch.is_tensor(gen_loss) and gen_loss.requires_grad:
+            gen_optimizer.zero_grad()
+            self.manual_backward(gen_loss)
+            self._clip_gradients_manual(gen_optimizer)
+            gen_optimizer.step()
+
+        # ------------------------------------------------------ discriminator
+        if discr_optimizer is not None and self.config.losses.adversarial.weight > 0:
+            discr_result = self._do_step(batch, batch_idx, mode='train', optimizer_idx=1)
+            discr_loss = discr_result['loss']
+            log_info.update(discr_result['log_info'])
+            if torch.is_tensor(discr_loss) and discr_loss.requires_grad:
+                discr_optimizer.zero_grad()
+                self.manual_backward(discr_loss)
+                self._clip_gradients_manual(discr_optimizer)
+                discr_optimizer.step()
+
+        # exponential moving average of the generator weights
+        # (previously handled in the removed ``training_step_end`` hook)
+        if self.average_generator \
+                and self.global_step >= self.average_generator_start_step \
+                and self.global_step >= self.last_generator_averaging_step + self.average_generator_period:
+            if self.generator_average is None:
+                self.generator_average = copy.deepcopy(self.generator)
+            else:
+                update_running_average(self.generator_average, self.generator, decay=self.generator_avg_beta)
+            self.last_generator_averaging_step = self.global_step
+
+        self.log_dict({k: v.mean() if torch.is_tensor(v) else v for k, v in log_info.items()},
+                      on_step=True, on_epoch=False)
+
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         extra_val_key = None
         if dataloader_idx == 0:
             mode = 'val'
@@ -158,27 +231,12 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
             mode = 'extra_val'
             extra_val_key = self.extra_val_titles[dataloader_idx - 2]
         self._is_training_step = False
-        return self._do_step(batch, batch_idx, mode=mode, extra_val_key=extra_val_key)
+        result = self._do_step(batch, batch_idx, mode=mode, extra_val_key=extra_val_key)
+        self.validation_step_outputs.append(result)
+        return result
 
-    def training_step_end(self, batch_parts_outputs):
-        if self.training and self.average_generator \
-                and self.global_step >= self.average_generator_start_step \
-                and self.global_step >= self.last_generator_averaging_step + self.average_generator_period:
-            if self.generator_average is None:
-                self.generator_average = copy.deepcopy(self.generator)
-            else:
-                update_running_average(self.generator_average, self.generator, decay=self.generator_avg_beta)
-            self.last_generator_averaging_step = self.global_step
-
-        full_loss = (batch_parts_outputs['loss'].mean()
-                     if torch.is_tensor(batch_parts_outputs['loss'])  # loss is not tensor when no discriminator used
-                     else torch.tensor(batch_parts_outputs['loss']).float().requires_grad_(True))
-        log_info = {k: v.mean() for k, v in batch_parts_outputs['log_info'].items()}
-        self.log_dict(log_info, on_step=True, on_epoch=False)
-        return full_loss
-
-    def validation_epoch_end(self, outputs):
-        outputs = [step_out for out_group in outputs for step_out in out_group]
+    def on_validation_epoch_end(self):
+        outputs = self.validation_step_outputs
         averaged_logs = average_dicts(step_out['log_info'] for step_out in outputs)
         self.log_dict({k: v.mean() for k, v in averaged_logs.items()})
 
@@ -220,6 +278,9 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
                             f'total {self.global_step} iterations:\n{cur_evaluator_res_df}')
                 for k, v in flatten_dict(cur_evaluator_res).items():
                     self.log(f'extra_val_{cur_eval_title}_{k}', v)
+
+        # free the accumulated outputs for the next validation run
+        self.validation_step_outputs.clear()
 
     def _do_step(self, batch, batch_idx, mode='train', optimizer_idx=None, extra_val_key=None):
         if optimizer_idx == 0:  # step for generator
@@ -288,4 +349,4 @@ class BaseInpaintingTrainingModule(ptl.LightningModule):
         batch['discr_output_diff'] = batch['discr_output_real'] - batch['discr_output_fake']
 
     def get_ddp_rank(self):
-        return self.trainer.global_rank if (self.trainer.num_nodes * self.trainer.num_processes) > 1 else None
+        return self.trainer.global_rank if self.trainer.world_size > 1 else None

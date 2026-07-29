@@ -35,13 +35,19 @@ from saicinpainting.utils import register_debug_signal_handlers
 LOGGER = logging.getLogger(__name__)
 
 
-@hydra.main(config_path='../configs/prediction', config_name='default.yaml')
+@hydra.main(version_base=None, config_path='../configs/prediction', config_name='default')
 def main(predict_config: OmegaConf):
     try:
         if sys.platform != 'win32':
             register_debug_signal_handlers()  # kill -10 <pid> will result in traceback dumped into log
 
-        device = torch.device("cpu")
+        # Respect the configured device (defaults to 'cuda', which is the ROCm GPU
+        # on AMD). Fall back to CPU if no GPU is available.
+        requested_device = predict_config.get('device', 'cuda')
+        if str(requested_device).startswith('cuda') and not torch.cuda.is_available():
+            LOGGER.warning('CUDA/ROCm device requested but not available - falling back to CPU')
+            requested_device = 'cpu'
+        device = torch.device(requested_device)
 
         train_config_path = os.path.join(predict_config.model.path, 'config.yaml')
         with open(train_config_path, 'r') as f:

@@ -1,4 +1,3 @@
-# @package _group_
 data_root_dir: /data/data
 out_root_dir: /data/experiments
 tb_dir: /data/tb_logs

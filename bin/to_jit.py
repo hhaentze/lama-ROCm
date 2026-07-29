@@ -25,7 +25,7 @@ class JITWrapper(nn.Module):
         return out["inpainted"]
 
 
-@hydra.main(config_path="../configs/prediction", config_name="default.yaml")
+@hydra.main(version_base=None, config_path="../configs/prediction", config_name="default")
 def main(predict_config: OmegaConf):
     if sys.platform != 'win32':
         register_debug_signal_handlers()  # kill -10 <pid> will result in traceback dumped into log

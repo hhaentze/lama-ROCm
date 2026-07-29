@@ -35,7 +35,7 @@ from saicinpainting.utils import register_debug_signal_handlers, get_shape
 LOGGER = logging.getLogger(__name__)
 
 
-@hydra.main(config_path='../configs/prediction', config_name='default_inner_features.yaml')
+@hydra.main(version_base=None, config_path='../configs/prediction', config_name='default_inner_features')
 def main(predict_config: OmegaConf):
     try:
         if sys.platform != 'win32':

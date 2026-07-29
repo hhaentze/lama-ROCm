@@ -1,17 +1,46 @@
-from albumentations import DualIAATransform, to_tuple
-import imgaug.augmenters as iaa
+import cv2
+import albumentations as A
 
-class IAAAffine2(DualIAATransform):
-    """Place a regular grid of points on the input and randomly move the neighbourhood of these point around
-    via affine transformations.
 
-    Note: This class introduce interpolation artifacts to mask if it has values other than {0;1}
+# imgaug used string border modes; albumentations' native Affine/Perspective use
+# OpenCV border flags. This maps the old imgaug ``mode`` strings onto them.
+_IMGAUG_MODE_TO_CV2 = {
+    'reflect': cv2.BORDER_REFLECT_101,
+    'symmetric': cv2.BORDER_REFLECT,
+    'replicate': cv2.BORDER_REPLICATE,
+    'edge': cv2.BORDER_REPLICATE,
+    'constant': cv2.BORDER_CONSTANT,
+    'wrap': cv2.BORDER_WRAP,
+}
 
-    Args:
-        p (float): probability of applying the transform. Default: 0.5.
+# imgaug interpolation ``order`` -> OpenCV interpolation flag.
+_ORDER_TO_INTERPOLATION = {
+    0: cv2.INTER_NEAREST,
+    1: cv2.INTER_LINEAR,
+    2: cv2.INTER_CUBIC,
+    3: cv2.INTER_CUBIC,
+    4: cv2.INTER_LANCZOS4,
+}
 
-    Targets:
-        image, mask
+
+def _to_range(value):
+    """Mirror albumentations.to_tuple for a scalar: x -> (-x, x); pass tuples through."""
+    if isinstance(value, (tuple, list)):
+        return tuple(value)
+    return (-value, value)
+
+
+class IAAAffine2(A.Affine):
+    """Drop-in replacement for the original imgaug-backed affine transform.
+
+    The original class subclassed albumentations' ``DualIAATransform`` (removed in
+    albumentations >= 1.0) and delegated to ``imgaug``. albumentations now provides
+    a native, imgaug-free ``Affine`` transform, so we just map the old imgaug-style
+    arguments used throughout the LaMa configs onto it. Passing ``scale``/``shear``
+    as ``{'x': ..., 'y': ...}`` preserves the original per-axis (independent)
+    sampling behaviour.
+
+    Targets: image, mask
     """
 
     def __init__(
@@ -27,58 +56,34 @@ class IAAAffine2(DualIAATransform):
         always_apply=False,
         p=0.5,
     ):
-        super(IAAAffine2, self).__init__(always_apply, p)
-        self.scale = dict(x=scale, y=scale)
-        self.translate_percent = to_tuple(translate_percent, 0)
-        self.translate_px = to_tuple(translate_px, 0)
-        self.rotate = to_tuple(rotate)
-        self.shear = dict(x=shear, y=shear)
-        self.order = order
-        self.cval = cval
-        self.mode = mode
-
-    @property
-    def processor(self):
-        return iaa.Affine(
-            self.scale,
-            self.translate_percent,
-            self.translate_px,
-            self.rotate,
-            self.shear,
-            self.order,
-            self.cval,
-            self.mode,
+        super().__init__(
+            scale=dict(x=scale, y=scale),
+            translate_percent=translate_percent,
+            translate_px=translate_px,
+            rotate=_to_range(rotate),
+            shear=dict(x=shear, y=shear),
+            interpolation=_ORDER_TO_INTERPOLATION.get(order, cv2.INTER_LINEAR),
+            cval=cval,
+            mode=_IMGAUG_MODE_TO_CV2.get(mode, cv2.BORDER_REFLECT_101),
+            always_apply=always_apply,
+            p=p,
         )
 
-    def get_transform_init_args_names(self):
-        return ("scale", "translate_percent", "translate_px", "rotate", "shear", "order", "cval", "mode")
 
+class IAAPerspective2(A.Perspective):
+    """Native albumentations replacement for the imgaug-backed perspective transform.
 
-class IAAPerspective2(DualIAATransform):
-    """Perform a random four point perspective transform of the input.
-
-    Note: This class introduce interpolation artifacts to mask if it has values other than {0;1}
-
-    Args:
-        scale ((float, float): standard deviation of the normal distributions. These are used to sample
-            the random distances of the subimage's corners from the full image's corners. Default: (0.05, 0.1).
-        p (float): probability of applying the transform. Default: 0.5.
-
-    Targets:
-        image, mask
+    Targets: image, mask
     """
 
     def __init__(self, scale=(0.05, 0.1), keep_size=True, always_apply=False, p=0.5,
                  order=1, cval=0, mode="replicate"):
-        super(IAAPerspective2, self).__init__(always_apply, p)
-        self.scale = to_tuple(scale, 1.0)
-        self.keep_size = keep_size
-        self.cval = cval
-        self.mode = mode
-
-    @property
-    def processor(self):
-        return iaa.PerspectiveTransform(self.scale, keep_size=self.keep_size, mode=self.mode, cval=self.cval)
-
-    def get_transform_init_args_names(self):
-        return ("scale", "keep_size")
+        super().__init__(
+            scale=scale,
+            keep_size=keep_size,
+            pad_mode=_IMGAUG_MODE_TO_CV2.get(mode, cv2.BORDER_REPLICATE),
+            pad_val=cval,
+            interpolation=_ORDER_TO_INTERPOLATION.get(order, cv2.INTER_LINEAR),
+            always_apply=always_apply,
+            p=p,
+        )

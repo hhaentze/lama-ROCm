@@ -20,14 +20,14 @@ def main(args):
     assert len(checkpoint_fnames) >= 1
 
     checkpoint_path = os.path.join(args.indir, 'models', checkpoint_fnames[0])
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     del checkpoint['optimizer_states']
 
     if len(checkpoint_fnames) > 1:
         for fname in checkpoint_fnames[1:]:
             print('sum', fname)
             sum_tensors_cnt = 0
-            other_cp = torch.load(os.path.join(args.indir, 'models', fname), map_location='cpu')
+            other_cp = torch.load(os.path.join(args.indir, 'models', fname), map_location='cpu', weights_only=False)
             for k in checkpoint['state_dict'].keys():
                 if checkpoint['state_dict'][k].dtype is torch.float:
                     checkpoint['state_dict'][k].data.add_(other_cp['state_dict'][k].data)

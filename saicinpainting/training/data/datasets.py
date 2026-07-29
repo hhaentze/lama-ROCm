@@ -47,7 +47,8 @@ class InpaintingTrainDataset(Dataset):
 
 class InpaintingTrainWebDataset(IterableDataset):
     def __init__(self, indir, mask_generator, transform, shuffle_buffer=200):
-        self.impl = webdataset.Dataset(indir).shuffle(shuffle_buffer).decode('rgb').to_tuple('jpg')
+        # webdataset >= 0.2 renamed ``Dataset`` to ``WebDataset``.
+        self.impl = webdataset.WebDataset(indir).shuffle(shuffle_buffer).decode('rgb').to_tuple('jpg')
         self.mask_generator = mask_generator
         self.transform = transform
 
