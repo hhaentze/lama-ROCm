@@ -99,10 +99,25 @@ python bin/train.py -cn lama-fourier \
 
 Key points for a single AMD GPU:
 
-- The trainer configs still say `gpus: -1` / `accelerator: ddp`; `bin/train.py`
-  now **auto-translates** these to the Lightning 2.x
-  `accelerator/devices/strategy` API and automatically **disables DDP when only
-  one GPU is present**, so single-GPU training just works with the stock configs.
+- **Single GPU by default (important for dGPU + iGPU systems).** The trainer
+  configs still say `gpus: -1` / `accelerator: ddp`; `bin/train.py` auto-translates
+  these to the Lightning 2.x `accelerator/devices/strategy` API. Because many AMD
+  desktops expose the integrated GPU as a second, compute-incapable device (multi-GPU
+  DDP across a dGPU+iGPU pair crashes with an RCCL *"invalid device function"*),
+  **`gpus: -1` now resolves to a single GPU** and prints a warning. You do **not**
+  need `HIP_VISIBLE_DEVICES=0` or `trainer.kwargs.gpus=1` anymore. To train on
+  several *real* compute GPUs, pass `trainer.kwargs.gpus=N` (N≥2) and select which
+  devices with `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES`.
+- **`${env:VAR}` works out of the box.** The `env` OmegaConf resolver used by
+  `resnet_pl.weights_path=${env:TORCH_HOME}` is registered automatically on import,
+  so you no longer need to register it yourself. Just `export TORCH_HOME=...`.
+- **Multi-worker data loading works.** `data.num_workers>0` no longer crashes with
+  *"Trying to resize storage that is not resizable"* — dataset arrays are now made
+  contiguous. Use e.g. `data.num_workers=8` for much faster training. `pin_memory`
+  and `persistent_workers` are enabled automatically.
+- **Faster matmuls.** `torch.set_float32_matmul_precision('high')` is set on import
+  (override with the `LAMA_MATMUL_PRECISION` env var: `highest` for full fp32, or
+  `off`). This silences the "Tensor Cores" warning and speeds up conv/matmul.
 - The default `lama-fourier` config uses the **ResNet perceptual loss**
   (`resnet_pl`), which requires the ADE20K segmentation model under
   `$TORCH_HOME/ade20k/...`. Download it as described in the main README, or set
@@ -110,6 +125,14 @@ Key points for a single AMD GPU:
 - Start with `precision: 32` (the default). fp16/bf16 also work on ROCm but are
   more likely to surface numerical edge cases; enable them only once fp32 trains
   stably.
+
+> **Custom training scripts** (e.g. a `train_bars.py`) should import the
+> Lightning-compat helpers instead of copying them:
+> ```python
+> from saicinpainting.training.trainers.pl_compat import (
+>     migrate_trainer_kwargs, migrate_checkpoint_kwargs)
+> ```
+> so they automatically pick up the single-GPU default and other fixes.
 
 ---
 
@@ -153,6 +176,25 @@ Key points for a single AMD GPU:
 - **webdataset:** `webdataset.Dataset` → `webdataset.WebDataset`.
 - Replaced removed numpy alias `np.int` with `int`.
 
+### Stability & speed fixes for real AMD runs
+- **`env` resolver** re-registered on import (`saicinpainting/__init__.py`) so
+  `${env:VAR}` configs resolve under OmegaConf ≥2.1 (which removed the built-in
+  `env` resolver).
+- **Multi-worker DataLoader crash fixed.** Dataset arrays are made C-contiguous
+  (`np.ascontiguousarray`) so `num_workers>0` no longer triggers *"Trying to resize
+  storage that is not resizable"* during collation. `pin_memory` and
+  `persistent_workers` are enabled by default for speed.
+- **Single-GPU default** on machines with an integrated GPU (avoids the dGPU+iGPU
+  DDP crash); multi-GPU is opt-in via `trainer.kwargs.gpus=N`. The migration
+  helpers now live in `saicinpainting/training/trainers/pl_compat.py` so custom
+  scripts can share them.
+- **`set_float32_matmul_precision('high')`** on import for faster matmuls
+  (`LAMA_MATMUL_PRECISION` to override).
+- **Hydra `_self_`** added to the training configs' `defaults:` lists to silence
+  the *"Defaults list is missing _self_"* warning (behaviour unchanged).
+- The optional *"Detectron v2 is not installed"* message is now a debug log, not a
+  print.
+
 ---
 
 ## 6. Troubleshooting
@@ -164,3 +206,7 @@ Key points for a single AMD GPU:
 | `_pickle.UnpicklingError` / `weights_only` error loading a checkpoint | Make sure you are on this fork — all loaders pass `weights_only=False`. |
 | Training crashes constructing `ResNetPL` | Download the ADE20K model into `$TORCH_HOME`, or set `losses.resnet_pl.weight=0`. |
 | Hydra error about `config_name` / `_group_` | Make sure you pulled this fork's `configs/` and `bin/` changes. |
+| `RCCL/NCCL ... invalid device function` at startup on a machine with an iGPU | Expected — DDP across dGPU+iGPU. This fork defaults to a single GPU; if you forced multi-GPU, set `HIP_VISIBLE_DEVICES=0`. |
+| `Trying to resize storage that is not resizable` with `num_workers>0` | Fixed in this fork (contiguous arrays). If you see it in custom dataset code, wrap returned arrays in `np.ascontiguousarray`. |
+| Lots of **MIOpen** warnings, slow first iterations | Normal: MIOpen compiles & caches conv kernels on first use. They disappear once the cache (`~/.cache/miopen`) is warm. Ensure that dir is writable; do not delete it between runs. |
+| `Unsupported interpolation type env` | You're on an older copy — pull this fork; the `env` resolver is now auto-registered. |

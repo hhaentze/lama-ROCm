@@ -10,7 +10,10 @@ try:
     from detectron2.engine import DefaultPredictor
     DETECTRON_INSTALLED = True
 except:
-    print("Detectron v2 is not installed")
+    # Detectron2 is only needed for the optional segmentation-based mask generator;
+    # it is not required for the default LaMa training/inference. Keep this quiet.
+    import logging as _logging
+    _logging.getLogger(__name__).debug("Detectron v2 is not installed")
     DETECTRON_INSTALLED = False
 
 from .countless.countless2d import zero_corrected_countless

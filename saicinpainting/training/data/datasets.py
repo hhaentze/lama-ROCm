@@ -41,8 +41,10 @@ class InpaintingTrainDataset(Dataset):
         # TODO: maybe generate mask before augmentations? slower, but better for segmentation-based masks
         mask = self.mask_generator(img, iter_i=self.iter_i)
         self.iter_i += 1
-        return dict(image=img,
-                    mask=mask)
+        # ensure C-contiguous arrays so multi-worker collation does not hit
+        # "Trying to resize storage that is not resizable"
+        return dict(image=np.ascontiguousarray(img),
+                    mask=np.ascontiguousarray(mask))
 
 
 class InpaintingTrainWebDataset(IterableDataset):
@@ -58,8 +60,8 @@ class InpaintingTrainWebDataset(IterableDataset):
             img = self.transform(image=img)['image']
             img = np.transpose(img, (2, 0, 1))
             mask = self.mask_generator(img, iter_i=iter_i)
-            yield dict(image=img,
-                       mask=mask)
+            yield dict(image=np.ascontiguousarray(img),
+                       mask=np.ascontiguousarray(mask))
 
 
 class ImgSegmentationDataset(Dataset):
@@ -84,8 +86,8 @@ class ImgSegmentationDataset(Dataset):
         img = np.transpose(img, (2, 0, 1))
         mask = self.mask_generator(img)
         segm, segm_classes= self.load_semantic_segm(path)
-        result = dict(image=img,
-                      mask=mask,
+        result = dict(image=np.ascontiguousarray(img),
+                      mask=np.ascontiguousarray(mask),
                       segm=segm,
                       segm_classes=segm_classes)
         return result
@@ -243,8 +245,27 @@ def make_default_train_dataloader(indir, kind='default', out_size=512, mask_gen_
         with open_dict(dataloader_kwargs):
             del dataloader_kwargs['shuffle']
 
-    dataloader = DataLoader(dataset, **dataloader_kwargs)
+    dataloader = DataLoader(dataset, **_apply_dataloader_speedups(dataloader_kwargs))
     return dataloader
+
+
+def _apply_dataloader_speedups(dataloader_kwargs):
+    """Return a plain-dict copy of ``dataloader_kwargs`` with a couple of low-risk
+    DataLoader speedups enabled unless explicitly overridden.
+
+    - ``pin_memory`` speeds up host->GPU transfers.
+    - ``persistent_workers`` keeps the worker processes alive between epochs
+      (avoids repeatedly re-spawning them, which matters because validation runs
+      every epoch). Only valid when num_workers > 0.
+    """
+    if OmegaConf.is_config(dataloader_kwargs):
+        dataloader_kwargs = OmegaConf.to_container(dataloader_kwargs, resolve=True)
+    else:
+        dataloader_kwargs = dict(dataloader_kwargs)
+    dataloader_kwargs.setdefault('pin_memory', torch.cuda.is_available())
+    if dataloader_kwargs.get('num_workers', 0):
+        dataloader_kwargs.setdefault('persistent_workers', True)
+    return dataloader_kwargs
 
 
 def make_default_val_dataset(indir, kind='default', out_size=512, transform_variant='default', **kwargs):
@@ -286,6 +307,7 @@ def make_default_val_dataloader(*args, dataloader_kwargs=None, **kwargs):
 
     if dataloader_kwargs is None:
         dataloader_kwargs = {}
+    _apply_dataloader_speedups(dataloader_kwargs)
     dataloader = DataLoader(dataset, **dataloader_kwargs)
     return dataloader
 

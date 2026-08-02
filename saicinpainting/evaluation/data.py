@@ -13,7 +13,11 @@ def load_image(fname, mode='RGB', return_orig=False):
     img = np.array(Image.open(fname).convert(mode))
     if img.ndim == 3:
         img = np.transpose(img, (2, 0, 1))
-    out_img = img.astype('float32') / 255
+    # np.transpose returns a non-contiguous view; ``.astype`` keeps that layout
+    # (order='K'). A non-contiguous array shares an unresizable buffer, which makes
+    # PyTorch's default_collate fail with "Trying to resize storage that is not
+    # resizable" once num_workers > 0. Force a contiguous copy to avoid that.
+    out_img = np.ascontiguousarray(img.astype('float32') / 255)
     if return_orig:
         return out_img, img
     else:
@@ -156,7 +160,7 @@ class InpaintingEvalOnlineDataset(Dataset):
     def __getitem__(self, i):
         img, raw_image = load_image(self.img_filenames[i], mode='RGB', return_orig=True)
         mask = self.mask_generator(img, raw_image=raw_image)
-        result = dict(image=img, mask=mask)
+        result = dict(image=np.ascontiguousarray(img), mask=np.ascontiguousarray(mask))
 
         if self.scale_factor is not None:
             result['image'] = scale_image(result['image'], self.scale_factor)
